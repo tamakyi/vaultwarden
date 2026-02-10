@@ -23,13 +23,19 @@ jobs:
         platform: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
     name: Build on ${{ matrix.platform }}
+    # 设置超时时间，避免长时间运行被取消
+    timeout-minutes: 60
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: 检查工具版本
+        shell: bash
         run: |
           git version
           cargo version
-          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             apt --version
           else
             vcpkg version
@@ -37,6 +43,7 @@ jobs:
 
       - name: vaultwarden 版本选择
         id: get_tag
+        shell: bash
         run: |
           if [ "${{ github.event.inputs.tag_choice }}" = "release" ]; then
             RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest)
@@ -50,39 +57,39 @@ jobs:
             echo "Using custom tag: ${{ github.event.inputs.tag }}"
             echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
           fi
-        shell: bash
 
       - name: 克隆 vaultwarden 仓库
+        shell: bash
         run: git clone https://github.com/dani-garcia/vaultwarden
 
       - name: 切换版本
         if: ${{ steps.get_tag.outputs.tag != '' }}
+        shell: bash
         run: git switch --detach "${{ steps.get_tag.outputs.tag }}"
         working-directory: vaultwarden
 
       - name: 下载 web-vault
+        shell: bash
         run: |
           RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest)
           DOWNLOAD_URL=$(echo "$RELEASE_API_RESPONSE" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | head -1 | cut -d'"' -f4)
           FILENAME=$(echo "$DOWNLOAD_URL" | rev | cut -d/ -f1 | rev)
 
           if [ -z "$DOWNLOAD_URL" ]; then
-            echo "Error: No .tar.gz asset found."
+            echo "::error::No .tar.gz asset found."
             exit 1
           fi
 
           echo "Downloading $FILENAME..."
           curl -L -o "$FILENAME" "$DOWNLOAD_URL"
 
-          # 修复：确保目标目录存在
           mkdir -p web-vault
-
           echo "Extracting..."
           tar -xzf "$FILENAME" -C web-vault --strip-components=1
-        shell: bash
 
       - name: 安装系统依赖 (Linux)
         if: matrix.platform == 'ubuntu-latest'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
@@ -97,6 +104,7 @@ jobs:
 
       - name: 使用 vcpkg 安装依赖 (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: cmd
         run: |
           vcpkg integrate install
           vcpkg install openssl:x64-windows-static
@@ -104,8 +112,9 @@ jobs:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
       - name: 编译 vaultwarden
+        shell: bash
         run: |
-          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             cargo build --features postgresql --release
           else
             cargo build --features postgresql --release
@@ -115,23 +124,29 @@ jobs:
           RUSTFLAGS: "${{ matrix.platform == 'windows-latest' && '-Ctarget-feature=+crt-static' || '' }}"
 
       - name: 移动文件
+        id: move_files
+        shell: bash
         run: |
-          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+          if [ "$RUNNER_OS" = "Linux" ]; then
             mv ./vaultwarden/target/release/vaultwarden ./vaultwarden_x64_debian
+            echo "exe_name=vaultwarden_x64_debian" >> $GITHUB_OUTPUT
+            echo "file_path=./vaultwarden_x64_debian" >> $GITHUB_OUTPUT
           else
             mv ./vaultwarden/target/release/vaultwarden.exe ./vaultwarden_x64_windows.exe
+            echo "exe_name=vaultwarden_x64_windows.exe" >> $GITHUB_OUTPUT
+            echo "file_path=./vaultwarden_x64_windows.exe" >> $GITHUB_OUTPUT
           fi
-        shell: bash
 
       - name: 版本信息
         id: get_version
+        shell: bash
         run: |
-          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
-            VERSION_OUTPUT=$(./vaultwarden.bin -v)
-            EXE_NAME="vaultwarden.bin"
+          FILE_PATH="${{ steps.move_files.outputs.file_path }}"
+          
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            VERSION_OUTPUT=$($FILE_PATH -v)
           else
-            VERSION_OUTPUT=$(./vaultwarden.exe -v)
-            EXE_NAME="vaultwarden.exe"
+            VERSION_OUTPUT=$($FILE_PATH -v)
           fi
 
           VAULTWARDEN_VERSION=$(echo "$VERSION_OUTPUT" | grep -oP 'Vaultwarden \K(\S+)' | head -1)
@@ -139,15 +154,13 @@ jobs:
 
           echo "Vaultwarden version: $VAULTWARDEN_VERSION"
           echo "Web-Vault version: $WEB_VAULT_VERSION"
-          echo "exe_name=$EXE_NAME" >> $GITHUB_OUTPUT
           echo "vaultwarden_version=$VAULTWARDEN_VERSION" >> $GITHUB_OUTPUT
           echo "web_vault_version=$WEB_VAULT_VERSION" >> $GITHUB_OUTPUT
-        shell: bash
 
       - name: 打包文件
         uses: actions/upload-artifact@v4
         with:
           name: Vaultwarden_${{ steps.get_version.outputs.vaultwarden_version }}_${{ steps.get_version.outputs.web_vault_version }}_${{ matrix.platform }}
           path: |
-            ${{ steps.get_version.outputs.exe_name }}
+            ${{ steps.move_files.outputs.file_path }}
             web-vault/
