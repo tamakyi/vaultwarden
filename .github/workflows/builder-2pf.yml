@@ -1,0 +1,157 @@
+name: Vaultwarden Build (Linux & Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_choice:
+        description: "版本选择"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - latest
+          - custom
+      tag:
+        description: "自定义 commit"
+        required: false
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # 定义要构建的平台
+        platform: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    # 为不同平台设置不同的输出名称后缀
+    name: Build on ${{ matrix.platform }}
+
+    steps:
+      - name: 检查工具版本
+        run: |
+          git version
+          cargo version
+          # 在Linux上检查apt，在Windows上检查vcpkg
+          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+            apt --version
+          else
+            vcpkg version
+          fi
+
+      - name: vaultwarden 版本选择
+        id: get_tag
+        # 使用条件判断来区分不同平台的脚本
+        run: |
+          if [ "${{ github.event.inputs.tag_choice }}" = "release" ]; then
+            RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest)
+            TAG_NAME=$(echo "$RELEASE_API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            echo "Using release tag: $TAG_NAME"
+            echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.tag_choice }}" = "latest" ]; then
+            echo "Using latest commit"
+            echo "tag=" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.tag_choice }}" = "custom" ]; then
+            echo "Using custom tag: ${{ github.event.inputs.tag }}"
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+        # 设置Shell，确保在Linux和Windows上都能正确运行Bash
+        shell: bash
+
+      - name: 克隆 vaultwarden 仓库
+        run: git clone https://github.com/dani-garcia/vaultwarden
+
+      - name: 切换版本
+        if: ${{ steps.get_tag.outputs.tag != '' }}
+        run: git switch --detach "${{ steps.get_tag.outputs.tag }}"
+        working-directory: vaultwarden
+
+      - name: 下载 web-vault
+        run: |
+          # 使用通用的方法获取最新Web Vault版本
+          RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest)
+          DOWNLOAD_URL=$(echo "$RELEASE_API_RESPONSE" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | head -1 | cut -d'"' -f4)
+          FILENAME=$(echo "$DOWNLOAD_URL" | rev | cut -d/ -f1 | rev)
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "Error: No .tar.gz asset found."
+            exit 1
+          fi
+
+          echo "Downloading $FILENAME..."
+          curl -L -o "$FILENAME" "$DOWNLOAD_URL"
+
+          echo "Extracting..."
+          tar -xzf "$FILENAME" -C web-vault --strip-components=1
+        shell: bash
+
+      - name: 安装系统依赖 (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: 配置 vcpkg 缓存 (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: 使用 vcpkg 安装依赖 (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          vcpkg integrate install
+          vcpkg install openssl:x64-windows-static
+        env:
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+      - name: 编译 vaultwarden
+        run: |
+          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+            cargo build --features postgresql --release
+          else
+            cargo build --features postgresql --release
+          fi
+        working-directory: vaultwarden
+        env:
+          # 仅为Windows设置静态链接标志
+          RUSTFLAGS: "${{ matrix.platform == 'windows-latest' && '-Ctarget-feature=+crt-static' || '' }}"
+
+      - name: 移动文件
+        run: |
+          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+            mv ./vaultwarden/target/release/vaultwarden ./vaultwarden_x64_linux
+          else
+            mv ./vaultwarden/target/release/vaultwarden.exe ./vaultwarden_x64_windows.exe
+          fi
+        shell: bash
+
+      - name: 版本信息
+        id: get_version
+        run: |
+          if [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
+            VERSION_OUTPUT=$(./vaultwarden.bin -v)
+            EXE_NAME="vaultwarden.bin"
+          else
+            VERSION_OUTPUT=$(./vaultwarden.exe -v)
+            EXE_NAME="vaultwarden.exe"
+          fi
+
+          VAULTWARDEN_VERSION=$(echo "$VERSION_OUTPUT" | grep -oP 'Vaultwarden \K(\S+)' | head -1)
+          WEB_VAULT_VERSION=$(echo "$VERSION_OUTPUT" | grep -oP 'Web-Vault \K(\S+)' | head -1)
+
+          echo "Vaultwarden version: $VAULTWARDEN_VERSION"
+          echo "Web-Vault version: $WEB_VAULT_VERSION"
+          echo "exe_name=$EXE_NAME" >> $GITHUB_OUTPUT
+          echo "vaultwarden_version=$VAULTWARDEN_VERSION" >> $GITHUB_OUTPUT
+          echo "web_vault_version=$WEB_VAULT_VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: 打包文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vaultwarden_${{ steps.get_version.outputs.vaultwarden_version }}_${{ steps.get_version.outputs.web_vault_version }}_${{ matrix.platform }}
+          path: |
+            ${{ steps.get_version.outputs.exe_name }}
+            web-vault/
