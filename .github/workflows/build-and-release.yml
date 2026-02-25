@@ -1,4 +1,4 @@
-name: Vaultwarden Build and Release
+name: Vaultwarden Build and Release For Postgres
 
 on:
   workflow_dispatch:
@@ -125,8 +125,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      release_created_at: ${{ steps.create_release.outputs.created_at }}
 
     steps:
+      - name: 获取当前时间
+        id: get_current_time
+        run: echo "current_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
       - name: 下载构建产物
         uses: actions/download-artifact@v4
         with:
@@ -144,6 +150,7 @@ jobs:
           ls -la
 
       - name: 创建 GitHub Release
+        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           files: |
@@ -157,7 +164,7 @@ jobs:
             **构建信息:**
             - **Vaultwarden 版本:** ${{ needs.build.outputs.vaultwarden_version }}
             - **Web-Vault 版本:** ${{ needs.build.outputs.web_vault_version }}
-            - **构建时间:** ${{ github.event.head_commit.timestamp || now() }}
+            - **构建时间:** ${{ steps.get_current_time.outputs.current_time }}
             - **构建系统:** Ubuntu Linux
             
             **包含文件:**
