@@ -1,4 +1,4 @@
-name: Vaultwarden Build and Release For Postgres
+name: Vaultwarden Build and Release
 
 on:
   workflow_dispatch:
@@ -125,8 +125,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      release_created_at: ${{ steps.create_release.outputs.created_at }}
 
     steps:
       - name: 获取当前时间
@@ -137,16 +135,50 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: Vaultwarden_Linux_*
-          path: ./release-files
+          path: ./artifact-files
+          merge-multiple: true
+
+      - name: 查看下载的文件结构
+        run: |
+          echo "当前目录结构:"
+          ls -la
+          echo -e "\nartifact-files 目录结构:"
+          ls -la ./artifact-files/
+          echo -e "\nartifact-files 目录内容:"
+          find ./artifact-files -type f -o -type d | sort
 
       - name: 准备 Release 文件
         run: |
-          cd ./release-files
+          # 进入下载的目录
+          cd ./artifact-files
+          echo "当前工作目录: $(pwd)"
+          echo "目录内容:"
+          ls -la
+          
+          # 检查文件是否存在
+          if [ ! -f "vaultwarden_linux" ]; then
+            echo "错误: vaultwarden_linux 文件不存在"
+            exit 1
+          fi
+          
+          if [ ! -d "web-vault" ]; then
+            echo "错误: web-vault 目录不存在"
+            exit 1
+          fi
+          
           # 创建压缩包
-          tar -czvf vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz vaultwarden_linux web-vault/
+          echo "正在创建压缩包..."
+          tar -czvf ../vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz vaultwarden_linux web-vault/
+          
+          # 返回到工作目录
+          cd ..
+          
           # 生成 SHA256 校验和
+          echo "正在生成 SHA256 校验和..."
           sha256sum vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz > SHA256SUMS.txt
-          # 显示文件列表
+          
+          # 显示最终文件列表
+          echo "最终文件列表:"
           ls -la
 
       - name: 创建 GitHub Release
@@ -154,8 +186,8 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            ./release-files/vaultwarden-*.tar.gz
-            ./release-files/SHA256SUMS.txt
+            vaultwarden-*.tar.gz
+            SHA256SUMS.txt
           name: Vaultwarden ${{ needs.build.outputs.vaultwarden_version }}
           tag_name: ${{ needs.build.outputs.vaultwarden_version }}
           body: |
