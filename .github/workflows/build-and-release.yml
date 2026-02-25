@@ -1,0 +1,177 @@
+name: Vaultwarden Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_choice:
+        description: "版本选择"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - latest
+          - custom
+      tag:
+        description: "自定义 commit"
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    outputs:
+      vaultwarden_version: ${{ steps.get_version.outputs.vaultwarden_version }}
+      web_vault_version: ${{ steps.get_version.outputs.web_vault_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 检查工具版本
+        run: |
+          git version
+          cargo version
+          apt --version
+
+      - name: vaultwarden 版本选择
+        id: get_tag
+        run: |
+          if [ "${{ github.event.inputs.tag_choice }}" = "release" ]; then
+            RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest)
+            TAG_NAME=$(echo "$RELEASE_API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            echo "Using release tag: $TAG_NAME"
+            echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.tag_choice }}" = "latest" ]; then
+            echo "Using latest commit"
+            echo "tag=" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event.inputs.tag_choice }}" = "custom" ]; then
+            echo "Using custom tag: ${{ github.event.inputs.tag }}"
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 克隆 vaultwarden 仓库
+        run: git clone https://github.com/dani-garcia/vaultwarden
+
+      - name: 切换版本
+        if: ${{ steps.get_tag.outputs.tag != '' }}
+        run: git switch --detach "${{ steps.get_tag.outputs.tag }}"
+        working-directory: vaultwarden
+
+      - name: 下载 web-vault
+        run: |
+          RELEASE_API_RESPONSE=$(curl -s https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest)
+          DOWNLOAD_URL=$(echo "$RELEASE_API_RESPONSE" | grep -o '"browser_download_url": "[^"]*\.tar\.gz"' | head -1 | cut -d'"' -f4)
+          FILENAME=$(echo "$DOWNLOAD_URL" | rev | cut -d/ -f1 | rev)
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "::error::No .tar.gz asset found."
+            exit 1
+          fi
+
+          echo "Downloading $FILENAME..."
+          curl -L -o "$FILENAME" "$DOWNLOAD_URL"
+
+          mkdir -p web-vault
+          echo "Extracting..."
+          tar -xzf "$FILENAME" -C web-vault --strip-components=1
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: 设置 Rust 缓存
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vaultwarden/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: 编译 vaultwarden
+        run: cargo build --features postgresql --release
+        working-directory: vaultwarden
+
+      - name: 移动文件
+        run: mv ./vaultwarden/target/release/vaultwarden ./vaultwarden_linux
+
+      - name: 版本信息
+        id: get_version
+        run: |
+          VERSION_OUTPUT=$(./vaultwarden_linux -v)
+          VAULTWARDEN_VERSION=$(echo "$VERSION_OUTPUT" | grep -oP 'Vaultwarden \K(\S+)' | head -1)
+          WEB_VAULT_VERSION=$(echo "$VERSION_OUTPUT" | grep -oP 'Web-Vault \K(\S+)' | head -1)
+
+          echo "Vaultwarden version: $VAULTWARDEN_VERSION"
+          echo "Web-Vault version: $WEB_VAULT_VERSION"
+          echo "vaultwarden_version=$VAULTWARDEN_VERSION" >> $GITHUB_OUTPUT
+          echo "web_vault_version=$WEB_VAULT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: 打包文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vaultwarden_Linux_${{ steps.get_version.outputs.vaultwarden_version }}
+          path: |
+            vaultwarden_linux
+            web-vault/
+
+  release:
+    needs: build
+    if: ${{ github.event.inputs.tag_choice == 'release' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Vaultwarden_Linux_*
+          path: ./release-files
+
+      - name: 准备 Release 文件
+        run: |
+          cd ./release-files
+          # 创建压缩包
+          tar -czvf vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz vaultwarden_linux web-vault/
+          # 生成 SHA256 校验和
+          sha256sum vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz > SHA256SUMS.txt
+          # 显示文件列表
+          ls -la
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ./release-files/vaultwarden-*.tar.gz
+            ./release-files/SHA256SUMS.txt
+          name: Vaultwarden ${{ needs.build.outputs.vaultwarden_version }}
+          tag_name: ${{ needs.build.outputs.vaultwarden_version }}
+          body: |
+            ## Vaultwarden ${{ needs.build.outputs.vaultwarden_version }}
+            
+            **构建信息:**
+            - **Vaultwarden 版本:** ${{ needs.build.outputs.vaultwarden_version }}
+            - **Web-Vault 版本:** ${{ needs.build.outputs.web_vault_version }}
+            - **构建时间:** ${{ github.event.head_commit.timestamp || now() }}
+            - **构建系统:** Ubuntu Linux
+            
+            **包含文件:**
+            1. `vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz` - 主程序压缩包
+            2. `SHA256SUMS.txt` - SHA256 校验和文件
+            
+            **使用说明:**
+            1. 解压文件: `tar -xzvf vaultwarden-${{ needs.build.outputs.vaultwarden_version }}-linux.tar.gz`
+            2. 验证完整性: `sha256sum -c SHA256SUMS.txt`
+            3. 运行程序: `./vaultwarden_linux`
+            
+            **注意事项:**
+            - 此版本包含 PostgreSQL 支持
+            - 建议在生产环境前进行充分测试
+          generate_release_notes: true
+          draft: false
+          prerelease: false
