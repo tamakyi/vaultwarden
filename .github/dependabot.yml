@@ -6,7 +6,6 @@ updates:
       interval: "daily"
     open-pull-requests-limit: 10
     groups:
-      # 把 TLS 相关依赖归为一组，方便一次性升级
       tls-deps:
         patterns:
           - "rustls*"
