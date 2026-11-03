@@ -156,7 +156,7 @@ yubico_ng = { version = "1.0.0", default-features = false }
 # danger-credential-internals is needed to support U2F to Webauthn migration
 webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation", "danger-credential-internals"] }
 webauthn-rs-proto = "0.5.5"
-webauthn-rs-core = "0.5.5"
+webauthn-rs-core = "0.6.2"
 
 # Handling of URL's for WebAuthn and favicons
 url = "2.5.8"
