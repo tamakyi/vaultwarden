@@ -35,7 +35,7 @@ use crate::{
 static WEBAUTHN: LazyLock<Webauthn> = LazyLock::new(|| {
     let domain = CONFIG.domain();
     let domain_origin = CONFIG.domain_origin();
-    let rp_id = Url::parse(&domain).map(|u| u.domain().map(str::to_owned)).ok().flatten().unwrap_or_default();
+    let rp_id = Url::parse(&domain).map_or_default(|u| u.domain().map_or_default(str::to_owned));
     let rp_origin = Url::parse(&domain_origin).unwrap();
 
     let webauthn = WebauthnBuilder::new(&rp_id, &rp_origin)
@@ -45,6 +45,14 @@ static WEBAUTHN: LazyLock<Webauthn> = LazyLock::new(|| {
 
     webauthn.build().expect("Building Webauthn failed")
 });
+
+fn user_verification_policy() -> UserVerificationPolicy {
+    if CONFIG.webauthn_2fa_prefer_user_verification() {
+        UserVerificationPolicy::Preferred
+    } else {
+        UserVerificationPolicy::Discouraged_DO_NOT_USE
+    }
+}
 
 pub fn routes() -> Vec<Route> {
     routes![
@@ -123,9 +131,9 @@ async fn get_webauthn(data: Json<PasswordOrOtpData>, headers: Headers, conn: DbC
     }
 
     let data: PasswordOrOtpData = data.into_inner();
-    let user = headers.user;
+    let mut user = headers.user;
 
-    data.validate(&user, false, &conn).await?;
+    data.validate(&mut user, false, &conn).await?;
 
     let (enabled, registrations) = get_webauthn_registrations(&user.uuid, &conn).await?;
     let keys: Vec<i32> = registrations.iter().map(|r| r.id).collect();
@@ -161,7 +169,8 @@ async fn generate_webauthn_challenge(data: Json<VerificationTokenData>, headers:
     )?;
 
     let mut state = serde_json::to_value(&state)?;
-    state["rs"]["policy"] = Value::String("discouraged".to_owned());
+    let user_verification_policy = user_verification_policy();
+    state["rs"]["policy"] = serde_json::to_value(user_verification_policy)?;
     state["rs"]["extensions"].as_object_mut().unwrap().clear();
 
     let type_ = TwoFactorType::WebauthnRegisterChallenge;
@@ -171,7 +180,7 @@ async fn generate_webauthn_challenge(data: Json<VerificationTokenData>, headers:
     // we need to modify some of the default settings defined by `start_passkey_registration()`.
     challenge.public_key.extensions = None;
     if let Some(asc) = challenge.public_key.authenticator_selection.as_mut() {
-        asc.user_verification = UserVerificationPolicy::Discouraged_DO_NOT_USE;
+        asc.user_verification = user_verification_policy;
     }
 
     let mut challenge_value = serde_json::to_value(challenge.public_key)?;
@@ -355,13 +364,9 @@ async fn inner_delete_webauthns(
     let mut removed: HashSet<Vec<u8>> = HashSet::new();
     let mut migrated = false;
 
-    keys.retain(|key| {
-        let retained = retain(key);
-        if !retained {
-            removed.insert(key.credential.cred_id().to_vec());
-            migrated = migrated || key.migrated;
-        }
-        retained
+    keys.extract_if(.., |key| !retain(key)).for_each(|key| {
+        removed.insert(key.credential.cred_id().to_vec());
+        migrated |= key.migrated;
     });
 
     if removed.is_empty() {
@@ -428,13 +433,14 @@ pub async fn generate_webauthn_login(user_id: &UserId, conn: &DbConn) -> JsonRes
 
     // Modify to discourage user verification
     let mut state = serde_json::to_value(&state)?;
-    state["ast"]["policy"] = Value::String("discouraged".to_owned());
+    let user_verification_policy = user_verification_policy();
+    state["ast"]["policy"] = serde_json::to_value(user_verification_policy)?;
 
     // Add appid, this is only needed for U2F compatibility, so maybe it can be removed as well
     let app_id = format!("{}/app-id.json", CONFIG.domain());
     state["ast"]["appid"] = Value::String(app_id.clone());
 
-    response.public_key.user_verification = UserVerificationPolicy::Discouraged_DO_NOT_USE;
+    response.public_key.user_verification = user_verification_policy;
     response
         .public_key
         .extensions
